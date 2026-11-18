@@ -1,18 +1,14 @@
-from pyspark.sql import *
-from delta import *
+from pyspark.sql import SparkSession
 
 
 def connect_to_spark():
-    builder = (
-        SparkSession
-        .builder
-        # .master("local[*]")
-        .remote("sc://localhost:15002")
-        .appName("Pollen")
-        .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-        .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
-    )
+  # Connect to the running Spark Connect server.
+  # Delta jars and extensions are pre-loaded on the server side,
+  # so no client-side package or extension configuration is required.
+  session = (
+      SparkSession.builder.remote("sc://localhost:15002")
+      .appName("Pollen")
+      .getOrCreate()
+  )
 
-    # Utworzenie sesji.
-    session = configure_spark_with_delta_pip(builder).getOrCreate()
-    return session
+  return session

@@ -67,46 +67,43 @@ def clean_bronze_data(path: str, datatype: str):
 
     cleaned_data = data.select(*relevant_columns)
 
-    if datatype == "pollen" or datatype == "meteo":
-        # Parse timestamps
-        cleaned_data = cleaned_data.withColumn(
-                "reference_timestamp",
-                F.to_timestamp(F.col("reference_timestamp"), "dd.MM.yyyy HH:mm")
-        )
+    # Parse timestamps
+    cleaned_data = cleaned_data.withColumn(
+        "reference_timestamp",
+        F.to_timestamp(F.col("reference_timestamp"), "dd.MM.yyyy HH:mm")
+    )
 
+    if datatype == "pollen" :
         # Fill Nans
         # Define window specifications partitioned by station and ordered chronologically
         base_window = Window.partitionBy("station_abbr").orderBy("reference_timestamp")
         cumulative_window = base_window.rowsBetween(Window.unboundedPreceding, 0)
 
-        # Apply conditional filling for each pollen parameter column
+        # Apply conditional filling for each pollen parameter column safely
         for col_name in value_columns:
             # Check for BOTH SQL nulls (None) and floating-point NaNs
             is_null = F.col(col_name).isNull() | F.isnan(F.col(col_name))
 
-            # 1. Create a unique group ID for consecutive missing blocks (null or NaN)
+            # 1. Create a unique group ID for consecutive missing blocks
             not_null_flag = F.when(is_null, 0).otherwise(1)
             group_id = F.sum(not_null_flag).over(cumulative_window)
 
-            # 2. Count the total number of consecutive missing values within that specific gap block
+            # 2. Count consecutive missing values within the gap block
             group_window = Window.partitionBy("station_abbr", group_id)
             null_count_in_group = F.sum(F.when(is_null, 1).otherwise(0)).over(group_window)
 
-            # 3. Compute the standard forward-filled value (ignoring nulls)
+            # 3. Compute standard forward-filled value
             forward_filled = F.last(F.col(col_name), ignorenulls=True).over(base_window)
 
-            # 4. Fill only if the value is missing AND the consecutive gap length is <= 2 (< 3 rows)
+            # 4. Fill only if missing AND gap length is within a safe limit (e.g., <= 3)
+            # This prevents processing infinitely large skew groups
             cleaned_data = cleaned_data.withColumn(
                 col_name,
-                F.when(is_null & (null_count_in_group <= 3), forward_filled)
-                .otherwise(F.col(col_name))
+                F.when(is_null & (null_count_in_group <= 3), forward_filled).otherwise(
+                    F.col(col_name)
+                ),
             )
     elif datatype == "phenology":
-        # Parse timestamps
-        cleaned_data = cleaned_data.withColumn(
-            "reference_timestamp",
-            F.to_timestamp(F.col("reference_timestamp"), "dd.MM.yyyy HH:mm")
-        )
         for col_name in value_columns:
             cleaned_data = cleaned_data.withColumn(
                 col_name,
@@ -115,6 +112,29 @@ def clean_bronze_data(path: str, datatype: str):
                 # 3. Parse into a proper timestamp
                 F.to_timestamp(F.col(col_name).cast("bigint").cast("string"), "yyyyMMdd")
             )
+    elif datatype == "meteo":
+        pollen_stations = (
+            spark_session.read.format("delta")
+            .load(str(DATA_DIR / "delta" / "metadata" / "pollen_stations"))
+            .select(
+                "closest_meteo_station",
+                F.to_timestamp(F.col("data_since"), "dd.MM.yyyy HH:mm").alias("data_since"),
+            )
+        )
+
+        # Join with pollen stations metadata and filter out records before data_since
+        cleaned_data = (
+            cleaned_data.join(
+                F.broadcast(pollen_stations),
+                cleaned_data["station_abbr"] == pollen_stations["closest_meteo_station"],
+                how="left",
+            )
+            .filter(
+                (F.col("reference_timestamp") >= F.col("data_since"))
+                | F.col("data_since").isNull()
+            )
+            .drop("data_since", "closest_meteo_station")
+        )
     else :
         raise ValueError("Unknown type")
 
@@ -122,24 +142,24 @@ def clean_bronze_data(path: str, datatype: str):
 
 def save_silver_data():
     spark_session = connect_to_spark()
-    metadata_dir = DATA_DIR/"delta"/"metadata"
-    pollen_stations = spark_session.read.format("delta").load(str(metadata_dir/"pollen_stations"))
-    phenology_stations = spark_session.read.format("delta").load(str(metadata_dir/"phenology_stations"))
-    meteo_stations = spark_session.read.format("delta").load(str(metadata_dir/"meteo_stations"))
-
-    # Extract station abbreviation strings into Python lists to iterate over
-    pollen_abbrs = [row["station_abbr"] for row in pollen_stations.select("station_abbr").collect()]
-    phenology_abbrs = [row["station_abbr"] for row in phenology_stations.select("station_abbr").collect()]
-    meteo_abbrs = [row["station_abbr"] for row in meteo_stations.select("station_abbr").collect()]
-
-    # Download raw data using correct type keywords matching download_data_by_station()
-    download_data_by_station(pollen_abbrs, "pollen_historical")
-    download_data_by_station(phenology_abbrs, "phenology")
-    download_data_by_station(meteo_abbrs, "meteo_historical")
-
-    save_data_folder(str(DATA_DIR/"pollen"), "pollen_historical")
-    save_data_folder(str(DATA_DIR/"phenology"), "phenology")
-    save_data_folder(str(DATA_DIR/"meteo"), "meteo_historical")
+    # metadata_dir = DATA_DIR/"delta"/"metadata"
+    # pollen_stations = spark_session.read.format("delta").load(str(metadata_dir/"pollen_stations"))
+    # phenology_stations = spark_session.read.format("delta").load(str(metadata_dir/"phenology_stations"))
+    # meteo_stations = spark_session.read.format("delta").load(str(metadata_dir/"meteo_stations"))
+    #
+    # # Extract station abbreviation strings into Python lists to iterate over
+    # pollen_abbrs = [row["station_abbr"] for row in pollen_stations.select("station_abbr").collect()]
+    # phenology_abbrs = [row["station_abbr"] for row in phenology_stations.select("station_abbr").collect()]
+    # meteo_abbrs = [row["station_abbr"] for row in meteo_stations.select("station_abbr").collect()]
+    #
+    # # Download raw data using correct type keywords matching download_data_by_station()
+    # download_data_by_station(pollen_abbrs, "pollen_historical")
+    # download_data_by_station(phenology_abbrs, "phenology")
+    # download_data_by_station(meteo_abbrs, "meteo_historical")
+    #
+    # save_data_folder(str(DATA_DIR/"pollen"), "pollen_historical")
+    # save_data_folder(str(DATA_DIR/"phenology"), "phenology")
+    # save_data_folder(str(DATA_DIR/"meteo"), "meteo_historical")
 
     silver_pollen = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"pollen_historical"), "pollen")
     silver_phenology = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"phenology"), "phenology")

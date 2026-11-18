@@ -2,17 +2,18 @@ import pandas as pd
 from pathlib import Path
 from scipy.spatial import cKDTree
 
+from config import DATA_DIR
 from data_loader import load_or_download_csv
 from pipeline.connect_to_spark import connect_to_spark
 
 def save_metadata():
     parameters = relevant_parameters()
     pollen_stations, phenology_stations, meteo_stations = relevant_stations()
+    datainventory = relevant_datainventory()
 
     spark_session = connect_to_spark()
 
-    project_root = Path(__file__).resolve().parent.parent
-    base_delta_path = project_root / "data" / "delta" / "metadata"
+    base_delta_path = DATA_DIR / "delta" / "metadata"
 
     # Save each DataFrame to the robust absolute path
     spark_session.createDataFrame(parameters).write \
@@ -35,9 +36,13 @@ def save_metadata():
         .mode("overwrite") \
         .save(str(base_delta_path / "meteo_stations"))
 
+    # spark_session.createDataFrame(datainventory).write \
+    #     .format("delta") \
+    #     .mode("overwrite") \
+    #     .save(str(base_delta_path / "datainventory"))
+
 def relevant_parameters():
-    project_root = Path(__file__).resolve().parent.parent
-    save_dir = str(project_root / "data" / "meta")
+    save_dir = str(DATA_DIR / "meta")
     # Selecting relevant pollen parameters
     pollen_parameters = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-pollen/",
                                          "ogd-pollen_meta_parameters.csv",
@@ -75,12 +80,11 @@ def relevant_parameters():
         raw_relevant_parameters.columns.str.contains(r'it$|fr$|de$', regex=True, na=False)
     ]
     clean_relevant_parameters = raw_relevant_parameters.drop(columns=columns_to_drop, errors='ignore')
-    return clean_relevant_parameters
+    return clean_relevant_parameters.to_dict(orient="records")
 
 
 def relevant_stations():
-    project_root = Path(__file__).resolve().parent.parent
-    save_dir = str(project_root / "data" / "meta")
+    save_dir = str(DATA_DIR / "meta")
     pollen_stations = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-pollen/",
                                            "ogd-pollen_meta_stations.csv",
                                            save_dir)
@@ -90,7 +94,11 @@ def relevant_stations():
     meteo_stations = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/",
                                           "ogd-smn_meta_stations.csv",
                                           save_dir)
+    pollen_datainventory = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-pollen/",
+                                                "ogd-pollen_meta_datainventory.csv",
+                                                save_dir)
 
+    # Add the closest stations
     pollen_stations = nearest_stations(pollen_stations, phenology_stations, "phenology")
     pollen_stations = nearest_stations(pollen_stations, meteo_stations, "meteo")
 
@@ -101,13 +109,43 @@ def relevant_stations():
         meteo_stations["station_abbr"].isin(pollen_stations["closest_meteo_station"])
     ]
 
-    columns_to_drop = pollen_stations.columns[pollen_stations.columns.str.contains(r'it$|fr$|de$', regex=True, na=False)]
+    # Add the start measurements date
+    earliest_map = (
+        pollen_datainventory.sort_values("data_since")
+        .drop_duplicates(subset=["station_abbr"], keep="first")
+        .set_index("station_abbr")["data_since"]
+    )
 
-    clean_pollen_stations = pollen_stations.drop(columns=columns_to_drop)
-    clean_phenology_stations = phenology_stations.drop(columns=columns_to_drop)
-    clean_meteo_stations = meteo_stations.drop(columns=columns_to_drop)
+    pollen_stations["data_since"] = pollen_stations["station_abbr"].map(earliest_map)
+
+    # Drop irrelevant columns
+    columns_to_drop = pollen_stations.columns[pollen_stations.columns.str.contains(r'_(it|fr|de)$', regex=True, na=False)]
+
+    clean_pollen_stations = pollen_stations.drop(columns=columns_to_drop).to_dict(orient="records")
+    clean_phenology_stations = phenology_stations.drop(columns=columns_to_drop).to_dict(orient="records")
+    clean_meteo_stations = meteo_stations.drop(columns=columns_to_drop).to_dict(orient="records")
     
     return clean_pollen_stations, clean_phenology_stations, clean_meteo_stations
+
+def relevant_datainventory():
+    save_dir = str(DATA_DIR / "meta")
+    pollen_datainventory = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-pollen/",
+                                           "ogd-pollen_meta_datainventory.csv",
+                                           save_dir)
+    # phenology_datainventory = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-phenology/",
+    #                                           "ogd-phenology_meta_datainventory.csv",
+    #                                           save_dir)
+    # meteo_datainventory = load_or_download_csv("https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/",
+    #                                       "ogd-smn_meta_datainventory.csv",
+    #                                       save_dir)
+
+    earliest_inventory = (
+        pollen_datainventory
+        .sort_values("data_since")
+        .drop_duplicates(subset=["station_abbr"], keep="first")
+    )
+
+    return earliest_inventory.to_dict(orient="records")
 
 def nearest_stations(target_stations_df: pd.DataFrame, search_stations_df: pd.DataFrame, station_type = ""):
     """
