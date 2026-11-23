@@ -77,32 +77,32 @@ def clean_bronze_data(path: str, datatype: str):
         # Fill Nans
         # Define window specifications partitioned by station and ordered chronologically
         base_window = Window.partitionBy("station_abbr").orderBy("reference_timestamp")
-        cumulative_window = base_window.rowsBetween(Window.unboundedPreceding, 0)
-
-        # Apply conditional filling for each pollen parameter column safely
-        for col_name in value_columns:
-            # Check for BOTH SQL nulls (None) and floating-point NaNs
-            is_null = F.col(col_name).isNull() | F.isnan(F.col(col_name))
-
-            # 1. Create a unique group ID for consecutive missing blocks
-            not_null_flag = F.when(is_null, 0).otherwise(1)
-            group_id = F.sum(not_null_flag).over(cumulative_window)
-
-            # 2. Count consecutive missing values within the gap block
-            group_window = Window.partitionBy("station_abbr", group_id)
-            null_count_in_group = F.sum(F.when(is_null, 1).otherwise(0)).over(group_window)
-
-            # 3. Compute standard forward-filled value
-            forward_filled = F.last(F.col(col_name), ignorenulls=True).over(base_window)
-
-            # 4. Fill only if missing AND gap length is within a safe limit (e.g., <= 3)
-            # This prevents processing infinitely large skew groups
-            cleaned_data = cleaned_data.withColumn(
-                col_name,
-                F.when(is_null & (null_count_in_group <= 3), forward_filled).otherwise(
-                    F.col(col_name)
-                ),
-            )
+        # cumulative_window = base_window.rowsBetween(Window.unboundedPreceding, 0)
+        #
+        # # Apply conditional filling for each pollen parameter column safely
+        # for col_name in value_columns:
+        #     # Check for BOTH SQL nulls (None) and floating-point NaNs
+        #     is_null = F.col(col_name).isNull() | F.isnan(F.col(col_name))
+        #
+        #     # 1. Create a unique group ID for consecutive missing blocks
+        #     not_null_flag = F.when(is_null, 0).otherwise(1)
+        #     group_id = F.sum(not_null_flag).over(cumulative_window)
+        #
+        #     # 2. Count consecutive missing values within the gap block
+        #     group_window = Window.partitionBy("station_abbr", group_id)
+        #     null_count_in_group = F.sum(F.when(is_null, 1).otherwise(0)).over(group_window)
+        #
+        #     # 3. Compute standard forward-filled value
+        #     forward_filled = F.last(F.col(col_name), ignorenulls=True).over(base_window)
+        #
+        #     # 4. Fill only if missing AND gap length is within a safe limit (e.g., <= 3)
+        #     # This prevents processing infinitely large skew groups
+        #     cleaned_data = cleaned_data.withColumn(
+        #         col_name,
+        #         F.when(is_null & (null_count_in_group <= 3), forward_filled).otherwise(
+        #             F.col(col_name)
+        #         ),
+        #     )
     elif datatype == "phenology":
         for col_name in value_columns:
             cleaned_data = cleaned_data.withColumn(
@@ -135,6 +135,8 @@ def clean_bronze_data(path: str, datatype: str):
             )
             .drop("data_since", "closest_meteo_station")
         )
+    elif datatype == "other":
+        pass
     else :
         raise ValueError("Unknown type")
 
@@ -142,47 +144,65 @@ def clean_bronze_data(path: str, datatype: str):
 
 def save_silver_data():
     spark_session = connect_to_spark()
-    # metadata_dir = DATA_DIR/"delta"/"metadata"
-    # pollen_stations = spark_session.read.format("delta").load(str(metadata_dir/"pollen_stations"))
-    # phenology_stations = spark_session.read.format("delta").load(str(metadata_dir/"phenology_stations"))
-    # meteo_stations = spark_session.read.format("delta").load(str(metadata_dir/"meteo_stations"))
-    #
-    # # Extract station abbreviation strings into Python lists to iterate over
-    # pollen_abbrs = [row["station_abbr"] for row in pollen_stations.select("station_abbr").collect()]
-    # phenology_abbrs = [row["station_abbr"] for row in phenology_stations.select("station_abbr").collect()]
-    # meteo_abbrs = [row["station_abbr"] for row in meteo_stations.select("station_abbr").collect()]
-    #
-    # # Download raw data using correct type keywords matching download_data_by_station()
-    # download_data_by_station(pollen_abbrs, "pollen_historical")
-    # download_data_by_station(phenology_abbrs, "phenology")
-    # download_data_by_station(meteo_abbrs, "meteo_historical")
-    #
-    # save_data_folder(str(DATA_DIR/"pollen"), "pollen_historical")
-    # save_data_folder(str(DATA_DIR/"phenology"), "phenology")
-    # save_data_folder(str(DATA_DIR/"meteo"), "meteo_historical")
+    metadata_dir = DATA_DIR/"delta"/"metadata"
+    pollen_stations = spark_session.read.format("delta").load(str(metadata_dir/"pollen_stations"))
+    phenology_stations = spark_session.read.format("delta").load(str(metadata_dir/"phenology_stations"))
+    meteo_stations = spark_session.read.format("delta").load(str(metadata_dir/"meteo_stations"))
 
-    silver_pollen = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"pollen_historical"), "pollen")
+    # Extract station abbreviation strings into Python lists to iterate over
+    pollen_abbrs = [row["station_abbr"] for row in pollen_stations.select("station_abbr").collect()]
+    phenology_abbrs = [row["station_abbr"] for row in phenology_stations.select("station_abbr").collect()]
+    meteo_abbrs = [row["station_abbr"] for row in meteo_stations.select("station_abbr").collect()]
+
+    # Download raw data using correct type keywords matching download_data_by_station()
+    download_data_by_station(pollen_abbrs, "pollen_historical")
+    download_data_by_station(pollen_abbrs, "pollen_recent")
+    download_data_by_station(phenology_abbrs, "phenology")
+    download_data_by_station(meteo_abbrs, "meteo_historical")
+    download_data_by_station(meteo_abbrs, "meteo_recent")
+
+    save_data_folder(str(DATA_DIR / "pollen_historical"), "pollen_historical")
+    save_data_folder(str(DATA_DIR / "pollen_recent"), "pollen_recent")
+    save_data_folder(str(DATA_DIR / "phenology"), "phenology")
+    save_data_folder(str(DATA_DIR / "meteo_historical"), "meteo_historical")
+    save_data_folder(str(DATA_DIR / "meteo_recent"), "meteo_recent")
+
+    silver_pollen_historical = clean_bronze_data(str(DATA_DIR / "delta" / "bronze" / "pollen_historical"), "pollen")
+    silver_pollen_recent = clean_bronze_data(str(DATA_DIR / "delta" / "bronze" / "pollen_recent"), "other")
     silver_phenology = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"phenology"), "phenology")
-    silver_meteo = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"meteo_historical"), "meteo")
+    silver_meteo_historical = clean_bronze_data(str(DATA_DIR/"delta"/"bronze"/"meteo_historical"), "meteo")
+    silver_meteo_recent = clean_bronze_data(str(DATA_DIR / "delta" / "bronze" / "meteo_recent"), "other")
 
-    print(f"Total rows: {silver_pollen.count()}")
+    print(f"Total rows: {silver_pollen_historical.count()}")
     # silver_pollen.show()
-    silver_pollen.write\
+    silver_pollen_historical.write\
         .format("delta")\
         .mode("overwrite")\
         .save(str(DATA_DIR/"delta"/"silver"/"pollen_historical"))
+    print(f"Total rows: {silver_pollen_recent.count()}")
+    # silver_pollen.show()
+    silver_pollen_recent.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .save(str(DATA_DIR / "delta" / "silver" / "pollen_recent"))
     print(f"Total rows: {silver_phenology.count()}")
     # silver_phenology.show()
     silver_phenology.write \
         .format("delta") \
         .mode("overwrite") \
         .save(str(DATA_DIR / "delta" / "silver" / "phenology"))
-    print(f"Total rows: {silver_meteo.count()}")
+    print(f"Total rows: {silver_meteo_historical.count()}")
     # silver_meteo.show()
-    silver_meteo.write \
+    silver_meteo_historical.write \
         .format("delta") \
         .mode("overwrite") \
         .save(str(DATA_DIR / "delta" / "silver" / "meteo_historical"))
+    print(f"Total rows: {silver_meteo_recent.count()}")
+    # silver_meteo.show()
+    silver_meteo_recent.write \
+        .format("delta") \
+        .mode("overwrite") \
+        .save(str(DATA_DIR / "delta" / "silver" / "meteo_recent"))
 
 if __name__ == "__main__":
     save_silver_data()
